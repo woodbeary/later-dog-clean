@@ -33,22 +33,56 @@ const CODE_TOKEN = /\/\*[\s\S]*?\*\/|\/\/[^\n]*|<!--[\s\S]*?-->|"(?:[^"\\\n]|\\.
 function codeTokens(text, extension) {
   const exact = [];
   const shape = [];
-  const source = HASH_COMMENT_EXTENSIONS.has(extension) ? text.replace(/(^|[ \t])#(?!!)[^\n]*/g, "$1") : text;
+  const prose = [];
+  let source = text;
+  if (HASH_COMMENT_EXTENSIONS.has(extension)) {
+    source = text.replace(/(^|[ \t])#(?!!)([^\n]*)/g, (whole, lead, comment) => {
+      prose.push(...proseTokens(comment));
+      return lead;
+    });
+  }
   for (const match of source.matchAll(CODE_TOKEN)) {
     const token = match[0];
     const first = token[0];
-    if (token.startsWith("/*") || token.startsWith("//") || token.startsWith("<!--")) continue;
+    if (token.startsWith("/*") || token.startsWith("//") || token.startsWith("<!--")) {
+      prose.push(...proseTokens(token));
+      continue;
+    }
     exact.push(token);
-    if (first === '"' || first === "'" || first === "`") shape.push("S");
-    else if (/^\d/.test(token)) shape.push("N");
+    if (first === '"' || first === "'" || first === "`") {
+      shape.push("S");
+      prose.push(...proseTokens(token.slice(1, -1)));
+    } else if (/^\d/.test(token)) shape.push("N");
     else if (/^[A-Za-z_$]/.test(token)) shape.push(KEYWORDS.has(token) ? token : "I");
     else shape.push(token);
   }
-  return { exact, shape };
+  return { exact, shape, prose };
 }
 
 function proseTokens(text) {
   return text.toLowerCase().match(/[\p{L}\p{N}]+(?:['’][\p{L}]+)?/gu) ?? [];
+}
+
+const FENCE = /^([ \t]*)(`{3,}|~{3,})([^\n]*)\n([\s\S]*?)\n\1\2[ \t]*$/gm;
+
+function markdownStreams(text) {
+  const exact = [];
+  const shape = [];
+  const prose = [];
+  const outside = text.replace(FENCE, (whole, indent, fence, info, body) => {
+    const language = info.trim().split(/\s+/)[0].toLowerCase();
+    const extension = language ? `.${{ typescript: "ts", javascript: "js", shell: "sh", bash: "sh", zsh: "sh", python: "py", yml: "yaml", tsx: "tsx", jsx: "jsx" }[language] ?? language}` : ".ts";
+    const streams = codeTokens(body, CODE_EXTENSIONS.has(extension) ? extension : ".ts");
+    exact.push(...streams.exact);
+    shape.push(...streams.shape);
+    prose.push(...streams.prose);
+    return "\n";
+  });
+  prose.push(...proseTokens(outside.replace(/`([^`\n]+)`/g, (whole, inline) => {
+    exact.push(...codeTokens(inline, ".ts").exact);
+    return inline;
+  })));
+  return { exact, shape, prose };
 }
 
 function tokenHash(token) {
@@ -119,10 +153,9 @@ export function winnow(hashes, w) {
 
 export function streamsOf(path, text) {
   const family = familyOf(path);
-  if (family === "code") {
-    const { exact, shape } = codeTokens(text, extname(path).toLowerCase());
-    return { exact, shape };
-  }
+  const extension = extname(path).toLowerCase();
+  if (family === "code") return codeTokens(text, extension);
+  if (family === "prose" && (extension === ".md" || extension === ".mdx")) return markdownStreams(text);
   if (family === "prose") return { prose: proseTokens(text) };
   return {};
 }
@@ -192,7 +225,7 @@ function build(output, sources) {
       }
     }
   }
-  const header = { format: "laterdog-cleanroom-fingerprints", version: 1, settings: SETTINGS, files, counts: {} };
+  const header = { format: "laterdog-cleanroom-fingerprints", version: 2, settings: SETTINGS, files, counts: {} };
   const parts = [];
   for (const mode of ["exact", "shape", "prose"]) {
     const sorted = Float64Array.from(sets[mode]).sort();
